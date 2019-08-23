@@ -38,8 +38,8 @@ char *CreateDummyBuffer(size_t size) {
   if (buf == NULL) {
     return NULL;
   }
-  for (; size; --size) {
-    buf[size] = sym;
+  for (; size > 0; --size) {
+    buf[size - 1] = sym;
   }
   return buf;
 }

@@ -18,11 +18,18 @@
 #endif
 
 
-const size_t dummy_buffer_size_ = 1024 * 1200;
+const size_t dummy_buffer_size_ = 1024 * 1200 * 256;
 
 #ifndef USE_SOCKET_IO
 const char *test_filename = "./testfile";
 #endif
+
+
+typedef enum {
+  kSelectReads,
+  kSelectWrites,
+  kSelectExceptions
+} SelectMode;
 
 
 char *CreateDummyBuffer(size_t size) {
@@ -57,6 +64,48 @@ int connect_to9997() {
 #endif
 
 
+int SetNonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1)
+    return 0;
+  if ( fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1 ) {
+    return 0;
+  }
+  return flags | O_NONBLOCK;
+}
+
+
+int SelectSingle(int fd, SelectMode mode, __time_t secs, __useconds_t usecs) {
+  fd_set writes, reads, excepts;
+  fd_set *pfds_w = &writes;
+  fd_set *pfds_r = NULL;
+  fd_set *pfds_e = NULL;
+  
+  FD_ZERO(&writes);
+  FD_ZERO(&reads);
+  FD_ZERO(&excepts);
+
+  FD_SET(fd, pfds_w);
+
+  if (mode == kSelectReads) {
+    pfds_w = NULL;
+    pfds_r = &reads;
+    FD_SET(fd, pfds_r);
+  }
+  else if (mode == kSelectExceptions) {
+    pfds_w = NULL;
+    pfds_e = &excepts;
+    FD_SET(fd, pfds_e);
+  }
+
+  struct timeval t;
+  t.tv_sec = secs;
+  t.tv_usec = usecs;
+
+  return select(fd + 1, pfds_r, pfds_w, pfds_e, &t);
+}
+
+
 int main(
 #ifndef USE_SOCKET_IO
 int argc, char *argv[]
@@ -77,49 +126,70 @@ int argc, char *argv[]
   }
 #endif
 
-  int flags = 0;
-  flags = fcntl(target_fd, F_GETFL, 0);
-  if (flags == -1)
-    perror("fcntl: getfl");
-  printf("fcntl flags: 0x%X\n", flags);
-   if (fcntl(target_fd, F_SETFL, flags | O_NONBLOCK) == -1)
-    perror("fcntl: setfl");
-  else
-    printf("fcntl flags (set): 0x%X\n", flags | O_NONBLOCK);
+
+  if (!SetNonblocking(target_fd)) {
+    perror("fcntl failure");
+    return errno;
+  }
+
   char *buffer = CreateDummyBuffer(dummy_buffer_size_);
   if (!buffer) {
     fprintf(stderr, "failed to allocate memory\n");
     return 3;
   }
-  struct timeval tv;
-  tv.tv_sec = 0;
-  tv.tv_usec = 700000;
-  fd_set write_fds;
-  FD_ZERO(&write_fds);
-  FD_SET(target_fd, &write_fds);
-  int res = select(target_fd + 1, NULL, &write_fds, NULL, &tv);
+  
+  int res = SelectSingle(target_fd, kSelectWrites, 0, 700000);
+
   if (res == 0) {
     printf("note: writeable timeout reached\n");
   } else if (res == -1) {
     perror("select failed");
   } else {
-    printf("select result is %i, usec = %lu\n", res, tv.tv_usec);
+    printf("select result is %i\n", res);
   }
+
   ssize_t n = -1;
-  unsigned int triescount = 4;
+  size_t bytes_remaining = dummy_buffer_size_;
+
   do {
-    n = write(target_fd, buffer, dummy_buffer_size_);
+#ifdef CLRSCR
+    printf("\033c");
+#endif
+    n = write(target_fd, buffer, bytes_remaining);
     printf("write result is %li\n", n);
     if (n == -1) {
       perror("write failed");
       printf("errno is %i\n", errno);
+      free(buffer);
+      return errno;
     }
-    tv.tv_usec = 700000;
-    select(target_fd + 1, NULL, &write_fds, NULL, &tv);
-    triescount -= 1;
-  } while (n == -1 && triescount > 0);
+    bytes_remaining -= n;
+
+    if (bytes_remaining <= 0) {
+      break;
+    }
+
+    printf("%li byte(s) remains\n", bytes_remaining);
+
+    while (1) {
+      res = SelectSingle(target_fd, kSelectWrites, 0, 200000);
+      printf("selected %i fds\n", res);
+      if (res == -1) {
+        free(buffer);
+        perror("select failed");
+        return errno;
+      }
+      if (res > 0) {
+        break;
+      }
+  }
+
+  } while (n > 0);
+
   free(buffer);
-  fprintf(stderr, "Done");
+
+  fprintf(stderr, "Done\n");
+
   close(target_fd);
   return 0;
 }
